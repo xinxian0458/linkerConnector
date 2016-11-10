@@ -3,13 +3,14 @@ package main
 import (
 	"bufio"
 	"fmt"
+	sendr "github.com/LinkerNetworks/linkerConnector/sender"
+	"github.com/spf13/cobra"
 	"io"
+	"net"
+	"net/textproto"
 	"os"
 	"runtime"
 	"time"
-
-	sendr "github.com/LinkerNetworks/linkerConnector/sender"
-	"github.com/spf13/cobra"
 )
 
 var (
@@ -18,6 +19,7 @@ var (
 
 func main() {
 	send = sendr.NewSender("linkerConnector")
+	var sourceType, sourceAddr string
 	var serverAddr, topic, dest, cAdvisorAddr, readProcPath string
 	var interval int
 	var usingPipe, disableFile bool
@@ -39,24 +41,52 @@ func main() {
 				return
 			}
 
-			for {
-				data := NewDataCollector()
-				procInfo := data.GetProcessInfo(cAdvisorAddr, readProcPath)
-				machineInfo := data.GetMachineInfo(readProcPath)
-
-				send.SendData(sendr.SendDataParam{Dest: dest, SerAddr: serverAddr, Topic: topic, Key: "ProcessInfo", Value: procInfo, DisableFileSave: disableFile})
-				send.SendData(sendr.SendDataParam{Dest: dest, SerAddr: serverAddr, Topic: topic, Key: "MachineInfo", Value: machineInfo, DisableFileSave: disableFile})
-
-				if interval == 0 {
+			if sourceType == "remote" {
+				if sourceAddr == "" {
+					fmt.Println("Need source address when sourctType is remote")
 					return
 				}
+				fmt.Println("Collect data from", serverAddr)
+				conn, err := net.Dial("tcp", sourceAddr)
+				if err != nil {
+					fmt.Println("Connect failed!", err)
+					return
+				}
+				defer conn.Close()
 
-				time.Sleep(time.Millisecond * time.Duration(interval))
+				reader := bufio.NewReader(conn)
+				tp := textproto.NewReader(reader)
+				for {
+					// read one line (ended with \n or \r\n)
+					sparklogInfo, err := tp.ReadLine()
+					if err != nil {
+						fmt.Println("failed to read line!", err)
+						return
+					}
+					fmt.Println("--------------", sparklogInfo)
+					send.SendData(sendr.SendDataParam{Dest: dest, SerAddr: serverAddr, Topic: topic, Key: "sparklog", Value: sparklogInfo, DisableFileSave: disableFile})
+				}
+			} else {
+				fmt.Println("Collect data from local server.")
+				for {
+					data := NewDataCollector()
+					procInfo := data.GetProcessInfo(cAdvisorAddr, readProcPath)
+					machineInfo := data.GetMachineInfo(readProcPath)
+					send.SendData(sendr.SendDataParam{Dest: dest, SerAddr: serverAddr, Topic: topic, Key: "ProcessInfo", Value: procInfo, DisableFileSave: disableFile})
+					send.SendData(sendr.SendDataParam{Dest: dest, SerAddr: serverAddr, Topic: topic, Key: "MachineInfo", Value: machineInfo, DisableFileSave: disableFile})
+					if interval == 0 {
+						return
+					}
+					time.Sleep(time.Millisecond * time.Duration(interval))
+				}
 			}
 		},
 	}
 
 	rootCmd.Flags().IntVarP(&interval, "interval", "i", 0, "Interval to retrieval data(millisecond), default 0 is not repeat.")
+
+	rootCmd.Flags().StringVarP(&sourceType, "sourceType", "m", "remote", "Type of the source, local or remote")
+	rootCmd.Flags().StringVarP(&sourceAddr, "sourceAddr", "a", "127.0.0.1:9999", "Remote socket address, (e.g. hostip:port)")
 
 	rootCmd.Flags().StringVarP(&readProcPath, "readProcPath", "r", "/proc", "File path of proc for linkerConnector to read from.")
 	rootCmd.Flags().StringVarP(&serverAddr, "server", "s", "", "The comma separated list of server could be brokers in the Kafka cluster or spark address")
@@ -64,7 +94,7 @@ func main() {
 	rootCmd.Flags().StringVarP(&dest, "dest", "d", "stdout", "Destination to kafka, spark and stdout")
 	rootCmd.Flags().StringVarP(&cAdvisorAddr, "cAdvisorAddr", "c", "", "Http Url and port for cAdvisor REST API (e.g. http://hostip:port)")
 	rootCmd.Flags().BoolVarP(&usingPipe, "pipe", "p", false, "Using pipe mode to forward data")
-	rootCmd.Flags().BoolVarP(&disableFile, "dsiableFileSave", "f", false, "Disable local file save.")
+	rootCmd.Flags().BoolVarP(&disableFile, "dsiableFileSave", "f", true, "Disable local file save.")
 
 	rootCmd.Execute()
 
